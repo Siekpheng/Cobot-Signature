@@ -117,7 +117,7 @@ def run_signature_on_robot(gcode_text, filename):
             else:
                 pts = item
                 spd = 0.8; acc = 0.4
-                safe_z = 450.00
+                safe_z = BASE_Z + 8.0
 
                 # Air travel to stroke start
                 start_pt = pts[0]
