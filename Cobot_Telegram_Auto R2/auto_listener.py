@@ -15,13 +15,13 @@ BOT_TOKEN = "8101041941:AAGKYlyJ6s4-BzkQL6q6DQj5VnRFu0SilBI"
 ROBOT_IP = '192.168.31.116'
 CMD_PORT = 5000
 
-BASE_X = 143.06
-BASE_Y = -605.66
-BASE_Z = 370.00  # Desk height (Paper)
-RX = 0.10
-RY = 0.10
-RZ = 19.92
-SIGNATURE_SCALE = 0.20  # 20% scale
+BASE_X = -270.00
+BASE_Y = -345.00
+BASE_Z = 120.00  # Desk height (Paper)
+RX = -179.90
+RY = -0.10
+RZ = 179.94
+SIGNATURE_SCALE = 0.40  # 20% scale
 
 def send_and_wait(sock, cmd_str):
     """Reliable wait for big moves (home, escape). Uses 2.5s timeout."""
@@ -29,7 +29,7 @@ def send_and_wait(sock, cmd_str):
     sock.sendall((cmd_str + '\n').encode('utf-8'))
     buffer = ""; command_accepted = False; motion_started = False
     while True:
-        sock.settimeout(2.5 if command_accepted and not motion_started else 30.0)
+        sock.settimeout(5 if command_accepted and not motion_started else 10.0)
         try:
             chunk = sock.recv(1024).decode('utf-8', errors='replace')
             if not chunk: break
@@ -44,12 +44,32 @@ def send_and_wait(sock, cmd_str):
         except socket.timeout:
             if command_accepted: return
 
+def send_draw_lift(sock, cmd_str):
+    """Fast send for drawing points. Uses 0.3s timeout like R1."""
+    sock.sendall((cmd_str + '\n').encode('utf-8'))
+    buffer = ""; command_accepted = False; motion_started = False
+    while True:
+        sock.settimeout(0.3 if command_accepted and not motion_started else 0.4)
+        try:
+            chunk = sock.recv(1024).decode('utf-8', errors='replace')
+            if not chunk: break
+            buffer += chunk
+            lines = buffer.split('\n'); buffer = lines[-1]
+            for line in lines[:-1]:
+                line = line.strip()
+                if 'command was executed' in line.lower(): command_accepted = True
+                if 'motion_changed][300]' in line or 'motion_changed][400]' in line: motion_started = True
+                if 'motion_changed][0]' in line and motion_started: return
+        except socket.timeout:
+            if command_accepted and not motion_started: return
+            elif motion_started: return
+
 def send_draw(sock, cmd_str):
     """Fast send for drawing points. Uses 0.3s timeout like R1."""
     sock.sendall((cmd_str + '\n').encode('utf-8'))
     buffer = ""; command_accepted = False; motion_started = False
     while True:
-        sock.settimeout(0.3 if command_accepted and not motion_started else 30.0)
+        sock.settimeout(0.08 if command_accepted and not motion_started else 0.08)
         try:
             chunk = sock.recv(1024).decode('utf-8', errors='replace')
             if not chunk: break
@@ -98,7 +118,7 @@ def run_signature_on_robot(gcode_text, filename):
                 else:
                     last_pt = current_stroke[-1]
                     dist = math.hypot(cur_x - last_pt['x'], cur_y - last_pt['y'])
-                    if dist >= 2.0:
+                    if dist >= 1.0:
                         current_stroke.append({'x': cur_x, 'y': cur_y})
 
     if current_stroke:
@@ -107,42 +127,68 @@ def run_signature_on_robot(gcode_text, filename):
     try:
         print(f"Executing: {filename}")
 
-        # Safe Home Configuration (Hovering 80mm above paper at Z=450)
-        home_cmd = "jointall 0.5, 0.5, 90.00, -16.72, -75.61, -87.79, 70.01, 180.18"
+        # Normalize the signature so the top-left of the drawing ALWAYS maps perfectly to BASE_X, BASE_Y
+        min_x = float('inf')
+        min_y = float('inf')
+        for item in strokes:
+            if isinstance(item, list):
+                for pt in item:
+                    if pt['x'] < min_x: min_x = pt['x']
+                    if pt['y'] < min_y: min_y = pt['y']
+                    
+        # Fallback if empty
+        if min_x == float('inf'): min_x = 0
+        if min_y == float('inf'): min_y = 0
+
+        # Safe Home Configuration (Requested exact parking position from photo)
+        home_cmd = "jointall 0.1, 0.05, 89.98, 9.65, -117.15, -72.50, 89.95, 0.17"
         send_and_wait(s_cmd, home_cmd)
 
+        is_first_move = True
         for item in strokes:
             if isinstance(item, dict) and item.get('travel'):
                 continue
             else:
                 pts = item
-                spd = 0.8; acc = 0.4
+                spd = 1; acc = 1
                 safe_z = BASE_Z + 8.0
 
                 # Air travel to stroke start
                 start_pt = pts[0]
-                cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
-                    spd, acc,
-                    BASE_X - (start_pt['x'] * SIGNATURE_SCALE),
-                    BASE_Y - (start_pt['y'] * SIGNATURE_SCALE),
-                    safe_z, RX, RY, RZ)
-                send_and_wait(s_cmd, cmd)
+                first_spd = 0.05 if is_first_move else spd
+                first_acc = 0.05 if is_first_move else acc
+                
+                if is_first_move:
+                    cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
+                        first_spd, first_acc,
+                        BASE_X + ((start_pt['x'] - min_x) * SIGNATURE_SCALE),
+                        BASE_Y + ((start_pt['y'] - min_y) * SIGNATURE_SCALE),
+                        safe_z, RX, RY, RZ)
+                    send_and_wait(s_cmd, cmd)
+                else:
+                    cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
+                        first_spd, first_acc,
+                        BASE_X + ((start_pt['x'] - min_x) * SIGNATURE_SCALE),
+                        BASE_Y + ((start_pt['y'] - min_y) * SIGNATURE_SCALE),
+                        safe_z, RX, RY, RZ)
+                    send_draw_lift(s_cmd, cmd)
+                is_first_move = False
 
-                # Plunge pen straight down to paper (must wait for full 50mm move!)
+                # Plunge pen straight down to paper (must wait for full move)
                 cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
                     spd, acc,
-                    BASE_X - (start_pt['x'] * SIGNATURE_SCALE),
-                    BASE_Y - (start_pt['y'] * SIGNATURE_SCALE),
+                    BASE_X + ((start_pt['x'] - min_x) * SIGNATURE_SCALE),
+                    BASE_Y + ((start_pt['y'] - min_y) * SIGNATURE_SCALE),
                     BASE_Z, RX, RY, RZ)
-                send_and_wait(s_cmd, cmd)
+                send_draw_lift(s_cmd, cmd)
 
                 # Draw points (fast 0.3s wait for tiny horizontal lines)
                 draw_z = BASE_Z
                 for pt in pts[1:]:
                     cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
                         spd, acc,
-                        BASE_X - (pt['x'] * SIGNATURE_SCALE),
-                        BASE_Y - (pt['y'] * SIGNATURE_SCALE),
+                        BASE_X + ((pt['x'] - min_x) * SIGNATURE_SCALE),
+                        BASE_Y + ((pt['y'] - min_y) * SIGNATURE_SCALE),
                         draw_z, RX, RY, RZ)
                     send_draw(s_cmd, cmd)
 
@@ -150,10 +196,10 @@ def run_signature_on_robot(gcode_text, filename):
                 last_pt = pts[-1]
                 cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
                     spd, acc,
-                    BASE_X - (last_pt['x'] * SIGNATURE_SCALE),
-                    BASE_Y - (last_pt['y'] * SIGNATURE_SCALE),
+                    BASE_X + ((last_pt['x'] - min_x) * SIGNATURE_SCALE),
+                    BASE_Y + ((last_pt['y'] - min_y) * SIGNATURE_SCALE),
                     safe_z, RX, RY, RZ)
-                send_and_wait(s_cmd, cmd)
+                send_draw_lift(s_cmd, cmd)
 
         # Return to safe home
         send_and_wait(s_cmd, home_cmd)
@@ -193,7 +239,12 @@ def listen_for_signatures():
                         attachment_url = data['attachment']['url']
                         filename = data['attachment']['name']
                         
-                        print(f"\n[!] INCOMING SIGNATURE: {filename}")
+                        # Skip if it's meant for Robot 1
+                        if filename.startswith('1_'):
+                            print(f"\n[SKIP] Ignoring {filename} (Targeted for Robot 1)")
+                            continue
+                            
+                        print(f"\n[!] INCOMING SIGNATURE FOR ROBOT 2: {filename}")
                         
                         # Notify user on Telegram that robot is starting
                         send_telegram_reply("1466832113", f"✅ Received {filename}! Robot 2 is starting to draw...")
