@@ -15,13 +15,13 @@ BOT_TOKEN = "8101041941:AAGKYlyJ6s4-BzkQL6q6DQj5VnRFu0SilBI"
 ROBOT_IP = '192.168.31.116'
 CMD_PORT = 5000
 
-BASE_X = -270.00
-BASE_Y = -345.00
-BASE_Z = 120.00  # Desk height (Paper)
+BASE_X = -111.00
+BASE_Y = -456.00
+BASE_Z = 76.00  # Desk height (Paper)
 RX = -179.90
 RY = -0.10
 RZ = 179.94
-SIGNATURE_SCALE = 0.40  # 20% scale
+SIGNATURE_SCALE = 0.60  # 20% scale
 
 def send_and_wait(sock, cmd_str):
     """Reliable wait for big moves (home, escape). Uses 2.5s timeout."""
@@ -29,7 +29,7 @@ def send_and_wait(sock, cmd_str):
     sock.sendall((cmd_str + '\n').encode('utf-8'))
     buffer = ""; command_accepted = False; motion_started = False
     while True:
-        sock.settimeout(5 if command_accepted and not motion_started else 10.0)
+        sock.settimeout(10 if command_accepted and not motion_started else 30.0)
         try:
             chunk = sock.recv(1024).decode('utf-8', errors='replace')
             if not chunk: break
@@ -49,7 +49,7 @@ def send_draw_lift(sock, cmd_str):
     sock.sendall((cmd_str + '\n').encode('utf-8'))
     buffer = ""; command_accepted = False; motion_started = False
     while True:
-        sock.settimeout(0.3 if command_accepted and not motion_started else 0.4)
+        sock.settimeout(1.1 if command_accepted and not motion_started else 1.1)
         try:
             chunk = sock.recv(1024).decode('utf-8', errors='replace')
             if not chunk: break
@@ -69,7 +69,7 @@ def send_draw(sock, cmd_str):
     sock.sendall((cmd_str + '\n').encode('utf-8'))
     buffer = ""; command_accepted = False; motion_started = False
     while True:
-        sock.settimeout(0.08 if command_accepted and not motion_started else 0.08)
+        sock.settimeout(0.4 if command_accepted and not motion_started else 0.5)
         try:
             chunk = sock.recv(1024).decode('utf-8', errors='replace')
             if not chunk: break
@@ -127,18 +127,42 @@ def run_signature_on_robot(gcode_text, filename):
     try:
         print(f"Executing: {filename}")
 
-        # Normalize the signature so the top-left of the drawing ALWAYS maps perfectly to BASE_X, BASE_Y
-        min_x = float('inf')
-        min_y = float('inf')
+                # Normalize the signature to fit perfectly inside a physical box (Width x Height in mm)
+        TARGET_WIDTH_MM = 60.0
+        TARGET_HEIGHT_MM = 30.0
+        
+        min_x = float('inf'); max_x = float('-inf')
+        min_y = float('inf'); max_y = float('-inf')
+        
         for item in strokes:
             if isinstance(item, list):
                 for pt in item:
                     if pt['x'] < min_x: min_x = pt['x']
+                    if pt['x'] > max_x: max_x = pt['x']
                     if pt['y'] < min_y: min_y = pt['y']
+                    if pt['y'] > max_y: max_y = pt['y']
                     
         # Fallback if empty
-        if min_x == float('inf'): min_x = 0
-        if min_y == float('inf'): min_y = 0
+        if min_x == float('inf'): min_x = 0; max_x = 1
+        if min_y == float('inf'): min_y = 0; max_y = 1
+
+        # Calculate original drawing size
+        draw_width = max_x - min_x
+        draw_height = max_y - min_y
+        
+        if draw_width == 0: draw_width = 1
+        if draw_height == 0: draw_height = 1
+
+        # Calculate the perfect scale so it fits the box
+        scale_x = TARGET_WIDTH_MM / draw_width
+        scale_y = TARGET_HEIGHT_MM / draw_height
+        
+        global SIGNATURE_SCALE
+        SIGNATURE_SCALE = min(scale_x, scale_y)
+
+        # OVERRIDE: Lock the Y-axis anchor to the tablet's dashed line!
+        # This forces the main body of the letters to sit on your physical BASE_Y line, and tails to dip below it.
+        min_y = 25.0
 
         # Safe Home Configuration (Requested exact parking position from photo)
         home_cmd = "jointall 0.1, 0.05, 89.98, 9.65, -117.15, -72.50, 89.95, 0.17"
@@ -150,13 +174,13 @@ def run_signature_on_robot(gcode_text, filename):
                 continue
             else:
                 pts = item
-                spd = 1; acc = 1
+                spd = 0.1; acc = 0.1
                 safe_z = BASE_Z + 8.0
 
                 # Air travel to stroke start
                 start_pt = pts[0]
-                first_spd = 0.05 if is_first_move else spd
-                first_acc = 0.05 if is_first_move else acc
+                first_spd = 0.07 if is_first_move else spd
+                first_acc = 0.07 if is_first_move else acc
                 
                 if is_first_move:
                     cmd = 'movetcp %.2f, %.2f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f' % (
